@@ -49,9 +49,16 @@ final class TimerManager: ObservableObject {
         return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
+    var totalClockString: String {
+        let h = Int(todayTotalSeconds) / 3600
+        let m = (Int(todayTotalSeconds) % 3600) / 60
+        let s = Int(todayTotalSeconds) % 60
+        return String(format: "%02d:%02d:%02d", h, m, s)
+    }
+
     var menuBarTitle: String {
         if !isTracking { return "\(emoji) --:--:--" }
-        return "\(emoji) \(clockString)"
+        return "\(emoji) \(totalClockString)"
     }
 
     init() {
@@ -224,8 +231,8 @@ final class TimerManager: ObservableObject {
         var snapshot = entry
         snapshot.endTime = Date()
 
-        ensureTodayLog()
-        if let idx = appData.logs.firstIndex(where: { Calendar.current.isDateInToday($0.date) }) {
+        ensureLog(for: snapshot.startTime)
+        if let idx = appData.logs.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: snapshot.startTime) }) {
             // Update or append the active entry
             if let entryIdx = appData.logs[idx].entries.firstIndex(where: { $0.id == snapshot.id }) {
                 appData.logs[idx].entries[entryIdx] = snapshot
@@ -241,8 +248,8 @@ final class TimerManager: ObservableObject {
         entry.endTime = Date()
         activeEntry = entry
 
-        ensureTodayLog()
-        if let idx = appData.logs.firstIndex(where: { Calendar.current.isDateInToday($0.date) }) {
+        ensureLog(for: entry.startTime)
+        if let idx = appData.logs.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: entry.startTime) }) {
             if let entryIdx = appData.logs[idx].entries.firstIndex(where: { $0.id == entry.id }) {
                 appData.logs[idx].entries[entryIdx] = entry
             } else {
@@ -254,9 +261,9 @@ final class TimerManager: ObservableObject {
         activeEntry = nil
     }
 
-    private func ensureTodayLog() {
-        if !appData.logs.contains(where: { Calendar.current.isDateInToday($0.date) }) {
-            appData.logs.append(DayLog())
+    private func ensureLog(for date: Date) {
+        if !appData.logs.contains(where: { Calendar.current.isDate($0.date, inSameDayAs: date) }) {
+            appData.logs.append(DayLog(date: date))
         }
     }
 
@@ -287,5 +294,92 @@ final class TimerManager: ObservableObject {
 
     func chargeCodeName(for id: UUID) -> String {
         appData.chargeCodes.first { $0.id == id }?.name ?? "Unknown"
+    }
+
+    // MARK: - Entry CRUD
+
+    func insertEntry(into logDate: Date, chargeCodeId: UUID, start: Date, end: Date) {
+        ensureLog(for: logDate)
+        guard let idx = appData.logs.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: logDate) }) else { return }
+
+        let newEntry = TimeEntry(chargeCodeId: chargeCodeId, startTime: start, endTime: end)
+        appData.logs[idx].entries = resolveOverlaps(existing: appData.logs[idx].entries, inserting: newEntry)
+        storage.save(appData)
+        recalcTodayTotal()
+    }
+
+    func updateEntry(in logDate: Date, entryId: UUID, chargeCodeId: UUID, start: Date, end: Date) {
+        guard let idx = appData.logs.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: logDate) }) else { return }
+
+        let originalAway = appData.logs[idx].entries.first(where: { $0.id == entryId })?.awaySeconds ?? 0
+        let updated = TimeEntry(id: entryId, chargeCodeId: chargeCodeId, startTime: start, endTime: end, awaySeconds: originalAway)
+        appData.logs[idx].entries = resolveOverlaps(existing: appData.logs[idx].entries, inserting: updated)
+        storage.save(appData)
+        recalcTodayTotal()
+    }
+
+    func deleteEntry(from logDate: Date, entryId: UUID) {
+        guard let idx = appData.logs.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: logDate) }) else { return }
+        appData.logs[idx].entries.removeAll { $0.id == entryId }
+        // Remove empty day logs
+        if appData.logs[idx].entries.isEmpty {
+            appData.logs.remove(at: idx)
+        }
+        storage.save(appData)
+        recalcTodayTotal()
+    }
+
+    // MARK: - Overlap Resolution
+
+    private func resolveOverlaps(existing: [TimeEntry], inserting: TimeEntry) -> [TimeEntry] {
+        let iStart = inserting.startTime
+        let iEnd = inserting.endTime ?? Date()
+
+        var result: [TimeEntry] = []
+
+        for entry in existing {
+            // Skip the entry being replaced (edit case)
+            if entry.id == inserting.id { continue }
+            // Don't touch live/active entries (no endTime)
+            if entry.endTime == nil {
+                result.append(entry)
+                continue
+            }
+
+            let eStart = entry.startTime
+            let eEnd = entry.endTime!
+
+            // No overlap — keep as-is
+            if eEnd <= iStart || eStart >= iEnd {
+                result.append(entry)
+                continue
+            }
+
+            // Left fragment: entry started before the insertion
+            if eStart < iStart {
+                let fragment = TimeEntry(chargeCodeId: entry.chargeCodeId, startTime: eStart, endTime: iStart,
+                                         awaySeconds: proportionalAway(original: entry, fragmentStart: eStart, fragmentEnd: iStart))
+                result.append(fragment)
+            }
+
+            // Right fragment: entry extends past the insertion
+            if eEnd > iEnd {
+                let fragment = TimeEntry(chargeCodeId: entry.chargeCodeId, startTime: iEnd, endTime: eEnd,
+                                         awaySeconds: proportionalAway(original: entry, fragmentStart: iEnd, fragmentEnd: eEnd))
+                result.append(fragment)
+            }
+            // Fully contained entries are dropped (no append)
+        }
+
+        result.append(inserting)
+        result.sort { $0.startTime < $1.startTime }
+        return result
+    }
+
+    private func proportionalAway(original: TimeEntry, fragmentStart: Date, fragmentEnd: Date) -> TimeInterval {
+        let originalDuration = (original.endTime ?? Date()).timeIntervalSince(original.startTime)
+        guard originalDuration > 0 else { return 0 }
+        let fragmentDuration = fragmentEnd.timeIntervalSince(fragmentStart)
+        return original.awaySeconds * (fragmentDuration / originalDuration)
     }
 }

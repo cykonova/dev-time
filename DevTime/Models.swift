@@ -15,7 +15,7 @@ struct ChargeCode: Identifiable, Codable, Hashable {
 struct TimeEntry: Identifiable, Codable {
     let id: UUID
     let chargeCodeId: UUID
-    let startTime: Date
+    var startTime: Date
     var endTime: Date?
     var awaySeconds: TimeInterval
 
