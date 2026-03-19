@@ -3,7 +3,7 @@ import SwiftUI
 struct LogView: View {
     @ObservedObject var timer: TimerManager
     @State private var selectedLogId: UUID?
-    @State private var showingNewDayEntry = false
+    @State private var showingAddEntry = false
 
     private var logsLastMonth: [DayLog] {
         let calendar = Calendar.current
@@ -13,6 +13,11 @@ struct LogView: View {
         return timer.appData.logs
             .filter { $0.date >= oneMonthAgo }
             .sorted { $0.date > $1.date }
+    }
+
+    private var selectedLogDate: Date? {
+        guard let id = selectedLogId else { return nil }
+        return timer.appData.logs.first { $0.id == id }?.date
     }
 
     var body: some View {
@@ -30,37 +35,36 @@ struct LogView: View {
             }
             .navigationTitle("Time Log")
             .frame(minWidth: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button {
-                        showingNewDayEntry = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .help("Add entry to a new day")
-                    .disabled(timer.appData.chargeCodes.isEmpty)
-                }
-            }
         } detail: {
             if let logId = selectedLogId,
                let _ = timer.appData.logs.first(where: { $0.id == logId }) {
-                DayDetailView(logId: logId, timer: timer)
+                DayDetailView(logId: logId, timer: timer) { onSelectLogId in
+                    selectedLogId = onSelectLogId
+                }
             } else {
-                Text("Select a date")
-                    .font(.title3)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 12) {
+                    Text("Select a date")
+                        .font(.title3)
+                        .foregroundStyle(.tertiary)
+                    Button {
+                        showingAddEntry = true
+                    } label: {
+                        Label("Add Entry", systemImage: "plus.circle.fill")
+                    }
+                    .disabled(timer.appData.chargeCodes.isEmpty)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .sheet(isPresented: $showingAddEntry) {
+                    EntryFormView(timer: timer, logDate: nil, existing: nil) { newLogId in
+                        selectedLogId = newLogId
+                    }
+                }
             }
         }
-        .frame(minWidth: 600, minHeight: 400)
+        .frame(minWidth: 700, minHeight: 400)
         .onAppear {
             if selectedLogId == nil {
                 selectedLogId = logsLastMonth.first?.id
-            }
-        }
-        .sheet(isPresented: $showingNewDayEntry) {
-            NewDayEntryForm(timer: timer) { newLogId in
-                selectedLogId = newLogId
             }
         }
     }
@@ -77,90 +81,12 @@ struct LogView: View {
     }
 }
 
-// MARK: - New Day Entry Form
-
-struct NewDayEntryForm: View {
-    @ObservedObject var timer: TimerManager
-    var onCreated: (UUID) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var date = Date()
-    @State private var selectedChargeCodeId: UUID?
-    @State private var startTime = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date()) ?? Date()
-    @State private var endTime = Calendar.current.date(bySettingHour: 17, minute: 0, second: 0, of: Date()) ?? Date()
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Add Entry")
-                .font(.headline)
-
-            Form {
-                DatePicker("Date", selection: $date, displayedComponents: .date)
-                    .onChange(of: date) { _, newDate in
-                        // Keep times on the selected date
-                        startTime = combineDateAndTime(date: newDate, time: startTime)
-                        endTime = combineDateAndTime(date: newDate, time: endTime)
-                    }
-
-                Picker("Task", selection: $selectedChargeCodeId) {
-                    Text("Select a task").tag(UUID?.none)
-                    ForEach(timer.appData.chargeCodes) { cc in
-                        Text("\(cc.name) (\(cc.code))").tag(UUID?.some(cc.id))
-                    }
-                }
-
-                DatePicker("Start", selection: $startTime, displayedComponents: .hourAndMinute)
-                DatePicker("End", selection: $endTime, displayedComponents: .hourAndMinute)
-            }
-            .formStyle(.grouped)
-
-            HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Add") {
-                    guard let ccId = selectedChargeCodeId else { return }
-                    let start = combineDateAndTime(date: date, time: startTime)
-                    let end = combineDateAndTime(date: date, time: endTime)
-                    timer.insertEntry(into: date, chargeCodeId: ccId, start: start, end: end)
-                    // Find the log we just created/updated so we can select it
-                    if let log = timer.appData.logs.first(where: { Calendar.current.isDate($0.date, inSameDayAs: date) }) {
-                        onCreated(log.id)
-                    }
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(selectedChargeCodeId == nil || endTime <= startTime)
-            }
-            .padding(.horizontal)
-            .padding(.bottom)
-        }
-        .frame(width: 350, height: 300)
-        .onAppear {
-            selectedChargeCodeId = timer.appData.chargeCodes.first?.id
-        }
-    }
-
-    private func combineDateAndTime(date: Date, time: Date) -> Date {
-        let cal = Calendar.current
-        let dateComps = cal.dateComponents([.year, .month, .day], from: date)
-        let timeComps = cal.dateComponents([.hour, .minute, .second], from: time)
-        var merged = DateComponents()
-        merged.year = dateComps.year
-        merged.month = dateComps.month
-        merged.day = dateComps.day
-        merged.hour = timeComps.hour
-        merged.minute = timeComps.minute
-        merged.second = timeComps.second
-        return cal.date(from: merged) ?? date
-    }
-}
-
 // MARK: - Day Detail View
 
 struct DayDetailView: View {
     let logId: UUID
     @ObservedObject var timer: TimerManager
+    var onSelectLog: ((UUID) -> Void)?
     @State private var showingEntryForm = false
     @State private var editingEntry: TimeEntry?
     @State private var entryToDelete: TimeEntry?
@@ -190,7 +116,7 @@ struct DayDetailView: View {
                             .font(.title3)
                     }
                     .buttonStyle(.plain)
-                    .help("Add entry to this day")
+                    .help("Add entry")
                     .disabled(timer.appData.chargeCodes.isEmpty)
                 }
                 .padding()
@@ -261,7 +187,9 @@ struct DayDetailView: View {
                 }
             }
             .sheet(isPresented: $showingEntryForm) {
-                EntryFormView(timer: timer, logDate: log.date, existing: editingEntry)
+                EntryFormView(timer: timer, logDate: log.date, existing: editingEntry) { newLogId in
+                    onSelectLog?(newLogId)
+                }
             }
             .alert("Delete Entry?", isPresented: Binding(
                 get: { entryToDelete != nil },
@@ -306,16 +234,20 @@ struct DayDetailView: View {
 
 struct EntryFormView: View {
     @ObservedObject var timer: TimerManager
-    let logDate: Date
+    let logDate: Date?
     let existing: TimeEntry?
+    var onLogCreated: ((UUID) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var date: Date = Date()
     @State private var selectedChargeCodeId: UUID?
     @State private var startTime: Date = Date()
     @State private var endTime: Date = Date()
 
     private var isEditing: Bool { existing != nil }
+    private var showDatePicker: Bool { !isEditing }
+    private var effectiveDate: Date { isEditing ? (logDate ?? date) : date }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -323,6 +255,14 @@ struct EntryFormView: View {
                 .font(.headline)
 
             Form {
+                if showDatePicker {
+                    DatePicker("Date", selection: $date, displayedComponents: .date)
+                        .onChange(of: date) { _, newDate in
+                            startTime = combineDateAndTime(date: newDate, time: startTime)
+                            endTime = combineDateAndTime(date: newDate, time: endTime)
+                        }
+                }
+
                 Picker("Task", selection: $selectedChargeCodeId) {
                     Text("Select a task").tag(UUID?.none)
                     ForEach(timer.appData.chargeCodes) { cc in
@@ -341,13 +281,16 @@ struct EntryFormView: View {
                 Spacer()
                 Button(isEditing ? "Save" : "Add") {
                     guard let ccId = selectedChargeCodeId else { return }
-                    let start = combineDateAndTime(date: logDate, time: startTime)
-                    let end = combineDateAndTime(date: logDate, time: endTime)
+                    let start = combineDateAndTime(date: effectiveDate, time: startTime)
+                    let end = combineDateAndTime(date: effectiveDate, time: endTime)
 
                     if let entry = existing {
-                        timer.updateEntry(in: logDate, entryId: entry.id, chargeCodeId: ccId, start: start, end: end)
+                        timer.updateEntry(in: effectiveDate, entryId: entry.id, chargeCodeId: ccId, start: start, end: end)
                     } else {
-                        timer.insertEntry(into: logDate, chargeCodeId: ccId, start: start, end: end)
+                        timer.insertEntry(into: effectiveDate, chargeCodeId: ccId, start: start, end: end)
+                    }
+                    if let log = timer.appData.logs.first(where: { Calendar.current.isDate($0.date, inSameDayAs: effectiveDate) }) {
+                        onLogCreated?(log.id)
                     }
                     dismiss()
                 }
@@ -357,17 +300,19 @@ struct EntryFormView: View {
             .padding(.horizontal)
             .padding(.bottom)
         }
-        .frame(width: 350, height: 250)
+        .frame(width: 350, height: showDatePicker ? 300 : 250)
         .onAppear {
             if let entry = existing {
                 selectedChargeCodeId = entry.chargeCodeId
                 startTime = entry.startTime
                 endTime = entry.endTime ?? Date()
+                date = entry.startTime
             } else {
                 selectedChargeCodeId = timer.appData.chargeCodes.first?.id
-                // Default to 9am-5pm on the log date
-                startTime = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: logDate) ?? logDate
-                endTime = Calendar.current.date(bySettingHour: 17, minute: 0, second: 0, of: logDate) ?? logDate
+                let baseDate = logDate ?? Date()
+                startTime = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: baseDate) ?? baseDate
+                endTime = Calendar.current.date(bySettingHour: 17, minute: 0, second: 0, of: baseDate) ?? baseDate
+                date = baseDate
             }
         }
     }

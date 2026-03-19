@@ -260,7 +260,7 @@ struct ContentView: View {
         let window = NSWindow(contentViewController: hosting)
         window.title = "DevTime - Time Log"
         window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
-        window.setContentSize(NSSize(width: 650, height: 450))
+        window.setContentSize(NSSize(width: 720, height: 450))
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
