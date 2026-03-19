@@ -270,11 +270,14 @@ final class TimerManager: ObservableObject {
     private func recalcTodayTotal() {
         var total: TimeInterval = 0
         if let todayLog = appData.logs.first(where: { Calendar.current.isDateInToday($0.date) }) {
-            total = todayLog.totalActiveSeconds
+            for entry in todayLog.entries {
+                // Skip the saved snapshot of the active entry — we'll use the live value
+                if let active = activeEntry, entry.id == active.id { continue }
+                total += entry.activeSeconds
+            }
         }
-        if let entry = activeEntry,
-           !(appData.logs.first(where: { Calendar.current.isDateInToday($0.date) })?.entries.contains(where: { $0.id == entry.id }) ?? false) {
-            total += entry.activeSeconds
+        if let active = activeEntry {
+            total += active.activeSeconds
         }
         todayTotalSeconds = total
     }
